@@ -52,13 +52,51 @@ end
 
 CRE.ENT = {
 	CHEST_MEGA = ent("Chest Mega"),
-	ROLLING_COIN = ent("Rolling Coin")
+	ROLLING_COIN = ent("Rolling Coin"),
+	SEALED_CHEST = ent("Sealed Chest")
 }
 
 CRE:AddCallback(ModCallbacks.MC_POST_UPDATE, function()
 	math.randomseed(Isaac.GetTime())
 	Isaac.SaveModData(CRE, json.encode(CRE.DATA))
 end)
+
+CRE.RegisteredEntities = {}
+
+function CRE.RegisterEntity(e)
+	if CRE.RegisteredEntities[level:GetCurrentRoomIndex()] == nil then CRE.RegisteredEntities[level:GetCurrentRoomIndex()] = {} end
+	CRE.RegisteredEntities[level:GetCurrentRoomIndex()][e.Index] = {Type = e.Type, Variant = e.Variant, Pos = e.Position, Vel = e.Velocity, Data = e:GetData()}
+end
+
+function CRE.UnRegisterEntity(e)
+	CRE.RegisteredEntities[level:GetCurrentRoomIndex()][e.Index] = nil
+end
+
+CRE:AddCallback(ModCallbacks.MC_POST_NEW_ROOM, function()
+	if not room:IsFirstVisit() then
+		for _,v in pairs(CRE.RegisteredEntities[level:GetCurrentRoomIndex()]) do
+			local ent = Isaac.Spawn(v.Type, v.Variant, 0, v.Pos, v.Vel, nil)
+			for k,v2 in pairs(v.Data) do
+				ent:GetData()[k] = v2
+			end
+		end
+	end
+	CRE.RegisteredEntities[level:GetCurrentRoomIndex()] = {}
+end)
+
+CRE:AddCallback(ModCallbacks.MC_POST_NEW_LEVEL, function()
+	CRE.RegisteredEntities = {}
+end)
+
+function CRE.GetPlayerItems(player)
+	local items = {}
+	for itemid=1, CollectibleType.NUM_COLLECTIBLES do
+		if player:HasCollectible(itemid) then
+			table.insert(items, itemid)
+		end
+	end
+	return items
+end
 
 ----------------
 -- CHEST MEGA --
@@ -326,3 +364,144 @@ CRE:AddCallback(ModCallbacks.MC_NPC_UPDATE, function(_, npc)
 	end
 	sprite:SetFrame(tostring(math.floor(angle%180/15)), 0) -- sets the animation based on the angle of the velocity
 end, CRE.ENT.ROLLING_COIN.id)
+
+------------------
+-- SEALED CHEST --
+------------------
+
+CRE.SealedChestDisabledItems = { -- these are one-time reward items, the chest won't take these items from you
+	[11]=1,[12]=1,[15]=1,[16]=1,[17]=1,[18]=1,[19]=1,[22]=1,[23]=1,[24]=1,[25]=1,[26]=1,[72]=1,[74]=1,[81]=1,[83]=1,
+	[92]=1,[100]=1,[106]=1,[125]=1,[137]=1,[140]=1,[141]=1,[184]=1,[190]=1,[195]=1,[196]=1,[198]=1,[209]=1,[218]=1,
+	[219]=1,[223]=1,[226]=1,[227]=1,[238]=1,[239]=1,[252]=1,[256]=1,[260]=1,[262]=1,[301]=1,[304]=1,[312]=1,[327]=1,[328]=1,[334]=1,
+	[343]=1,[344]=1,[346]=1,[353]=1,[354]=1,[366]=1,[367]=1,[380]=1,[409]=1,[415]=1,[428]=1,[438]=1,[438]=1,[449]=1,[451]=1,
+	[454]=1,[456]=1,[457]=1,[458]=1,[464]=1,[501]=1,[517]=1
+}
+CRE.TimerSinceUsedSealedChest = 0 -- there is some delay before you can get an item from other chests
+
+CRE:AddCallback(ModCallbacks.MC_POST_UPDATE, function() -- timer for CRE.TimerSinceUsedSealedChest
+	if CRE.TimerSinceUsedSealedChest ~= 0 then
+		CRE.TimerSinceUsedSealedChest = CRE.TimerSinceUsedSealedChest-1
+	end
+end)
+
+CRE:AddCallback(ModCallbacks.MC_NPC_UPDATE, function(_, npc)
+	if npc.Variant ~= CRE.ENT.SEALED_CHEST.variant then return end
+	local data,sprite = npc:GetData(),npc:GetSprite()
+	
+	CRE.RegisterEntity(npc) -- this function makes the enemy persist in this room
+	if sprite:IsEventTriggered("BreakChain") then -- projectile attack whenever a chain breaks
+		local r = math.random(1,45)
+		for i=1, 8 do
+			Isaac.Spawn(EntityType.ENTITY_PROJECTILE, 0, 0, npc.Position, Vector.FromAngle(i*45+r)*8, npc)
+		end
+	end
+	if not data.SealedItem then -- if the enemy has no item selected yet, it will do so
+		npc:AddEntityFlags(EntityFlag.FLAG_NO_KNOCKBACK)
+		npc:AddEntityFlags(EntityFlag.FLAG_NO_PHYSICS_KNOCKBACK)
+		local items = CRE.GetPlayerItems(player) -- gives all items the player currently has
+		local nondisableditems = {}
+		for _,v in ipairs(items) do -- removing all one-time reward items
+			if not CRE.SealedChestDisabledItems[v] then
+				table.insert(nondisableditems, v)
+			end
+		end
+		if #nondisableditems ~= 0 then -- chest takes a random item from you
+			data.SealedItem = nondisableditems[math.random(#nondisableditems)]
+			data.SealedItemCharge = player:GetActiveCharge()
+			player:RemoveCollectible(data.SealedItem)
+			sprite:ReplaceSpritesheet(1, "gfx/items/collectibles/"..tostring(data.SealedItem)..".png")
+			sprite:LoadGraphics()
+			sprite:Play("CollectItem", true)
+		else -- couldn't get any items from you
+			data.SealedItem = "none"
+			sprite:ReplaceSpritesheet(1, "gfx/items/collectibles/0.png")
+			sprite:LoadGraphics()
+			sprite:Play("CollectItem", true)
+		end
+		data.Chains = 3
+	elseif not sprite:IsPlaying("CollectItem") then
+		local hopping = sprite:IsPlaying("Hop") or sprite:IsPlaying("Hop3Chains") or sprite:IsPlaying("Hop2Chains") or sprite:IsPlaying("Hop1Chains")
+		local isbreakingchain = sprite:IsPlaying("BreakChain1") or sprite:IsPlaying("BreakChain2") or sprite:IsPlaying("BreakChain3")
+		if not hopping and not isbreakingchain and data.Chains > 0 then -- whenever the chest hits the ground or has just broken a chain
+			npc.Velocity = Vector(0,0) -- reseting velocity for after a hop
+			if room:IsClear() then -- breaks the chains himself if the room is cleared
+				npc.HitPoints = 1
+				if not isbreakingchain then
+					sprite:Play("BreakChain"..tostring(data.Chains), true)
+					data.Chains = data.Chains-1
+				end
+			elseif data.Chains == 3 and npc.HitPoints <= npc.MaxHitPoints/3*2 then -- 2/3 of health, first chain breaks
+				data.Chains = 2
+				sprite:Play("BreakChain3", true)
+			elseif data.Chains == 2 and npc.HitPoints <= npc.MaxHitPoints/3 then -- 1/3 of health, second chain breaks
+				data.Chains = 1
+				sprite:Play("BreakChain2", true)
+			elseif data.Chains == 1 and npc.HitPoints == 1 then -- basically death (but it gets prevented), thrid chain breaks
+				data.Chains = 0
+				sprite:Play("BreakChain1", true)
+			else
+				local bestdir = -1
+				local distancefromplayer = 0
+				local currentlengthtoplayer = (player.Position-npc.Position):Length()
+				for i=1, 18 do -- calculates what the best hop would be
+					local vel = Vector.FromAngle(i*20)*5
+					local newlengthtoplayer = (player.Position-(npc.Position+vel*12)):Length()
+					local grid = room:GetGridEntity(room:GetGridIndex(vel))
+					if not grid or grid and grid.Desc.Type == GridEntityType.GRID_DECORATION then
+						grid = "none"
+					end
+					if grid == "none" and newlengthtoplayer > currentlengthtoplayer and newlengthtoplayer > distancefromplayer then
+						distancefromplayer = newlengthtoplayer
+						bestdir = i*20
+					end
+				end
+				if data.Chains ~= 0 then -- chooses hop animation based on how many chains it has
+					sprite:Play("Hop"..tostring(data.Chains).."Chains", true)
+				else
+					sprite:Play("Hop", true)
+				end
+				if bestdir ~= -1 then -- set velocity, and some randomness to the hop
+					npc.Velocity = Vector.FromAngle(bestdir+(math.random()-0.5)*40)*5
+				end
+			end
+		elseif data.Chains == 0 and not isbreakingchain then -- turning into item pedestal mode
+			npc.CollisionDamage = 0
+			npc:ClearEntityFlags(EntityFlag.FLAG_NO_PHYSICS_KNOCKBACK)
+			npc.Velocity = npc.Velocity*0.5 -- prevents the chest from sliding over the ground
+			if data.SealedItem ~= "none" and not sprite:IsPlaying("ItemPedestal") then -- sets up the item for the player to pick
+				sprite:ReplaceSpritesheet(1, "gfx/items/collectibles/"..tostring(data.SealedItem)..".png")
+				sprite:LoadGraphics()
+				sprite:Play("ItemPedestal", true)
+			end
+			-- when the player gets close enough to pick up the item
+			if sprite:IsPlaying("ItemPedestal") and (player.Position-npc.Position):Length() <= player.Size+npc.Size+2 and CRE.TimerSinceUsedSealedChest == 0 then
+				CRE.TimerSinceUsedSealedChest = 43
+				local activeitem = player:GetActiveItem()
+				local charge = player:GetActiveCharge()
+				player:AddCollectible(data.SealedItem, data.SealedItemCharge, false)
+				player:AnimateCollectible(data.SealedItem, "Pickup", "PlayerPickup")
+				data.SealedItem = "none"
+				-- if the player had an active item, and picks up a new active item, put the other active item in the chest
+				if activeitem ~= 0 and activeitem ~= player:GetActiveItem() then
+					data.SealedItem = activeitem
+					data.SealedItemCharge = charge
+					sprite:ReplaceSpritesheet(1, "gfx/items/collectibles/"..tostring(data.SealedItem)..".png")
+					sprite:LoadGraphics()
+				end
+			end
+			if data.SealedItem == "none" and not sprite:IsFinished("IdleOpen") then
+				sprite:SetFrame("IdleOpen", 0)
+			end
+		end
+	end
+end, CRE.ENT.SEALED_CHEST.id)
+
+CRE:AddCallback(ModCallbacks.MC_ENTITY_TAKE_DMG, function(_, e, dmg, flag, src, invuln) -- preventing the chest from taking damage when it acts as portal
+	if e.Variant ~= CRE.ENT.SEALED_CHEST.variant then return end
+	if e.HitPoints == 1 then -- chest cannot get under 1 hitpoints, he'll become invulnerable
+		return false
+	elseif e.HitPoints-dmg < 1 then
+		e:TakeDamage(e.HitPoints-1, flag, src, invuln)
+		return false
+	end
+end, CRE.ENT.SEALED_CHEST.id)
